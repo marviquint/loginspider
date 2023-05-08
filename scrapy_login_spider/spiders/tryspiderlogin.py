@@ -8,13 +8,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from urllib.parse import urlparse
 from urllib.parse import urlparse, parse_qs
-from selenium.common.exceptions import TimeoutException, WebDriverException
-
+from selenium.common.exceptions import NoSuchWindowException
 
 
 class GrcSpider(scrapy.Spider):
     name = "grc_spider"
-    start_urls = ["dashboard"]
+    start_urls = ["dashboard "]
 
     def __init__(self, username="username", password="password", *args, **kwargs):
         super(GrcSpider, self).__init__(*args, **kwargs)
@@ -25,7 +24,7 @@ class GrcSpider(scrapy.Spider):
 
     def start_requests(self):
         # Start by logging in using Selenium
-        self.driver.get("login")
+        self.driver.get("login page")
         username_input = self.driver.find_element(By.NAME, "username")
         password_input = self.driver.find_element(By.NAME, "password")
         login_button = self.driver.find_element(By.XPATH, "//button")
@@ -88,98 +87,79 @@ class GrcSpider(scrapy.Spider):
         filter_option2 = response.meta['driver'].find_element(By.CSS_SELECTOR, filter_option_selector2)
         response.meta['driver'].execute_script("arguments[0].click();", filter_option2)
 
-       # Wait for the page to load
-        try:
-            WebDriverWait(response.meta['driver'], 120).until(
-                EC.presence_of_element_located((By.TAG_NAME, 'a'))
-            )
-        except TimeoutException:
-            print('Timeout: Page did not load within 2 minutes')
+        # Wait for the page to load
+        WebDriverWait(response.meta['driver'], 120).until(
+            EC.presence_of_element_located((By.XPATH, '//td')),
+            EC.presence_of_element_located((By.XPATH, '//*[contains(concat( " ", @class, " " ), concat( " ", "type", " " ))]//a'))
+        )
 
-        # Find all the document links using JavaScript
-        try:
-            document_links = response.meta['driver'].execute_script("return Array.from(document.getElementsByTagName('a')).filter(a => a.href !== '');")
-        except Exception:
-            print('Error: Failed to execute JavaScript code')
+        # Get all the datatable elements
+        datatables = response.xpath('//*[@id="yuievtautoid-0"]')
 
+        # Get all the document links from all the datatables
+        document_links = []
+        for datatable in datatables:
+            datatable_links = datatable.xpath('.//a/@href').extract()
+            document_links.extend(datatable_links)
+        num_links = len(document_links)
+        self.logger.info(f"Found {num_links} document links")
+
+        # Get the handle of the original tab
+        original_tab_handle = self.driver.current_window_handle
+
+        # Open all the links in separate tabs
+        tabs = []
         for i, document_link in enumerate(document_links, start=1):
-            # Check if the link contains the workspace nodeRef
-            if 'workspace://SpacesStore/' in document_link.get_attribute('href'):
-                # Extract the href attribute value from the document link
-                document_link_url = document_link.get_attribute('href')
+            # Append the base URL to the document link
+            document_url = "url" + document_link
 
-                # Get the unique document id from the document link url
-                unique_id = document_link_url.split('/')[-1]
+            # Click the document link using JavaScript to open it in a new tab
+            self.driver.execute_script("window.open(arguments[0]);", document_url)
+            tabs.append(self.driver.window_handles[-1]) # Save the handle of the new tab
 
-                # Construct the new url to open the document page
-                document_url = f"unique"
+        # Process the links in parallel
+        for tab, document_link in zip(tabs, document_links):
+            # Switch to the tab with the document
+            self.driver.switch_to.window(tab)
 
-                # Click the document link to open the document page in a new tab using JavaScript
-                try:
-                    response.meta['driver'].execute_script(f"window.open('{document_url}');")
-                except Exception:
-                    print(f"Error: Failed to execute JavaScript code for document {i}")
+            # Wait for the document page to load
+            WebDriverWait(self.driver, 120).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, '.node-info .dark')),
+                EC.presence_of_element_located((By.CSS_SELECTOR, '.form-fields'))
+            )
 
-                # Switch to the new tab
-                response.meta['driver'].switch_to.window(response.meta['driver'].window_handles[-1])
+            # Extract the document title and properties using Scrapy
+            document_title = Selector(text=self.driver.page_source).css('.node-info .dark::text').get().strip()
+            document_properties = Selector(text=self.driver.page_source).css('.field-item').getall()
 
-                # Wait for the document title and document properties to load
-                try:
-                    WebDriverWait(response.meta['driver'], 120).until(
-                        EC.presence_of_element_located((By.CLASS_NAME, 'node-info')),
-                        EC.presence_of_element_located((By.CLASS_NAME, 'field-item'))
-                    )
-                except TimeoutException:
-                    print(f'Timeout: Failed to load document {i} within 2 minutes')
+            # Store the document data in a dictionary
+            properties_dict = {}
+            for prop in document_properties:
+                key = Selector(text=prop).css('label::text').get().strip()
+                value = Selector(text=prop).css('.field-item::text').get().strip()
+                properties_dict[key] = value
 
-                # Extract the document title and properties using class names
-                try:
-                    document_title = response.meta['driver'].find_element_by_class_name('node-info').text
-                    document_properties = response.meta['driver'].find_elements_by_class_name('field-item')
-                except Exception:
-                    print(f'Error: Failed to find document {i} elements')
+            document_data = {
+                'title': document_title.strip(),
+                'properties': properties_dict,
+            }
 
-                # Store the document data in a dictionary
-                properties_dict = {}
-                for prop in document_properties:
-                    key = prop.find_element_by_tag_name('label').text.strip()
-                    value = prop.find_element_by_class_name('field-item').text.strip()
-                    properties_dict[key] = value
+            print(document_data) # Print the scraped data
 
-                document_data = {
-                    'title': document_title.strip(),
-                    'properties': properties_dict,
-                    'url': response.meta['driver'].current_url
-                }
+            # Close the document page using JavaScript
+            self.driver.close()
 
-                print(document_data) # Print the scraped data
+            # Switch back to the original tab
+            self.driver.switch_to.window(original_tab_handle)
 
-                # Close the document tab using JavaScript
-                close_tab_js = "window.close();"
-                try:
-                    response.meta['driver'].execute_script(close_tab_js)
-                except Exception:
-                    print(f"Error: Failed to close document {i} tab")
+        # Close all the tabs
+        for tab in tabs:
+            self.driver.switch_to.window(tab)
+            self.driver.close()
 
-                # Switch back to the task list tab
-                response.meta['driver'].switch_to.window(response.meta['driver'].window_handles[0])
+        # Switch back to the original tab
+        self.driver.switch_to.window(original_tab_handle)
 
-                # Wait for the task list page to load
-                try:
-                    WebDriverWait(response.meta['driver'], 120).until(
-                        EC.presence_of_element_located((By.ID, 'tasksGridContainer'))
-                    )
-                except TimeoutException:
-                    print('Timeout: Task list page did not load within 2 minutes')
-
-                # Check if there are more pages of tasks
-                next_button = response.meta['driver'].find_element_by_css_selector('a[id^="yui-pg"]').find_element_by_xpath('./following-sibling::a')
-                if next_button.get_attribute('title') == 'Next Page':
-                    # Click the next page button to load the next page of tasks
-                    next_button.click()
-
-                    # Parse the next page of tasks recursively
-                    yield from self.parse(response)
 
 
     def handle_error(self, failure):
