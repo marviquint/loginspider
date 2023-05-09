@@ -9,11 +9,12 @@ from selenium.webdriver.support import expected_conditions as EC
 from urllib.parse import urlparse
 from urllib.parse import urlparse, parse_qs
 from selenium.common.exceptions import NoSuchWindowException
+from time import sleep
 
 
 class GrcSpider(scrapy.Spider):
     name = "grc_spider"
-    start_urls = ["dashboard "]
+    start_urls = ["dashboard"]
 
     def __init__(self, username="username", password="password", *args, **kwargs):
         super(GrcSpider, self).__init__(*args, **kwargs)
@@ -24,7 +25,7 @@ class GrcSpider(scrapy.Spider):
 
     def start_requests(self):
         # Start by logging in using Selenium
-        self.driver.get("login page")
+        self.driver.get("loginpage")
         username_input = self.driver.find_element(By.NAME, "username")
         password_input = self.driver.find_element(By.NAME, "password")
         login_button = self.driver.find_element(By.XPATH, "//button")
@@ -78,7 +79,10 @@ class GrcSpider(scrapy.Spider):
         filter_option = response.meta['driver'].find_element(By.CSS_SELECTOR, filter_option_selector1)
         response.meta['driver'].execute_script("arguments[0].click();", filter_option)
 
-        filter_option_selector2 = '#insert-taskTitle li:nth-child(1) .filter4'
+        # Add a delay between clicks to mimic human behavior
+        sleep(3)
+
+        filter_option_selector2 = '#insert-taskTitle .filter4'
         WebDriverWait(response.meta['driver'], 120).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, filter_option_selector2))
         )
@@ -87,20 +91,17 @@ class GrcSpider(scrapy.Spider):
         filter_option2 = response.meta['driver'].find_element(By.CSS_SELECTOR, filter_option_selector2)
         response.meta['driver'].execute_script("arguments[0].click();", filter_option2)
 
+        # Add another delay before scraping the data
+        sleep(3)
+
         # Wait for the page to load
-        WebDriverWait(response.meta['driver'], 120).until(
+        WebDriverWait(self.driver, 120).until(
             EC.presence_of_element_located((By.XPATH, '//td')),
-            EC.presence_of_element_located((By.XPATH, '//*[contains(concat( " ", @class, " " ), concat( " ", "type", " " ))]//a'))
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'tbody a'))
         )
 
-        # Get all the datatable elements
-        datatables = response.xpath('//*[@id="yuievtautoid-0"]')
-
-        # Get all the document links from all the datatables
-        document_links = []
-        for datatable in datatables:
-            datatable_links = datatable.xpath('.//a/@href').extract()
-            document_links.extend(datatable_links)
+        # Get all the document links from the table
+        document_links = response.xpath('//*[contains(concat( " ", @class, " " ), concat( " ", "type", " " ))]//a/@href')
         num_links = len(document_links)
         self.logger.info(f"Found {num_links} document links")
 
@@ -111,16 +112,12 @@ class GrcSpider(scrapy.Spider):
         tabs = []
         for i, document_link in enumerate(document_links, start=1):
             # Append the base URL to the document link
-            document_url = "url" + document_link
+            document_url = "url" + document_link.get()
 
-            # Click the document link using JavaScript to open it in a new tab
-            self.driver.execute_script("window.open(arguments[0]);", document_url)
-            tabs.append(self.driver.window_handles[-1]) # Save the handle of the new tab
-
-        # Process the links in parallel
-        for tab, document_link in zip(tabs, document_links):
-            # Switch to the tab with the document
-            self.driver.switch_to.window(tab)
+            # Open a new tab and navigate to the document URL
+            self.driver.execute_script("window.open();")
+            self.driver.switch_to.window(self.driver.window_handles[-1])
+            self.driver.get(document_url)
 
             # Wait for the document page to load
             WebDriverWait(self.driver, 120).until(
@@ -146,21 +143,14 @@ class GrcSpider(scrapy.Spider):
 
             print(document_data) # Print the scraped data
 
-            # Close the document page using JavaScript
+            # Close the document tab
             self.driver.close()
 
             # Switch back to the original tab
             self.driver.switch_to.window(original_tab_handle)
 
-        # Close all the tabs
-        for tab in tabs:
-            self.driver.switch_to.window(tab)
-            self.driver.close()
-
-        # Switch back to the original tab
-        self.driver.switch_to.window(original_tab_handle)
-
-
+        # Close the driver
+        self.driver.quit()
 
     def handle_error(self, failure):
         # Log any errors
